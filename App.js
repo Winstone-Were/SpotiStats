@@ -1,15 +1,22 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { Button, View, StyleSheet, SafeAreaView } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri, useAuthRequest } from 'expo-auth-session';
-import { Button, View, Text, StyleSheet, Image, FlatList } from 'react-native';
-import Constants from 'expo-constants';
+import * as SecureStore from 'expo-secure-store';
+import { NavigationContainer } from '@react-navigation/native';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { CLIENT_ID, CLIENT_SECRET } from './secret_keys';
+import Songs from './Pages/Songs';
+import Artists from './Pages/Artists';
+import { Ionicons } from '@expo/vector-icons';
 
-import {CLIENT_ID, CLIENT_SECRET} from './secret_keys'
 
 const discovery = {
   authorizationEndpoint: 'https://accounts.spotify.com/authorize',
   tokenEndpoint: 'https://accounts.spotify.com/api/token',
 };
+
+const Tab = createBottomTabNavigator();
 
 export default function App() {
   const [request, response, promptAsync] = useAuthRequest(
@@ -25,9 +32,22 @@ export default function App() {
     discovery
   );
 
-
   const [accessToken, setAccessToken] = useState(null);
-  const [topArtists, setTopArtists] = useState([]);
+
+  useEffect(() => {
+    const loadTokens = async () => {
+      const savedAccessToken = await SecureStore.getItemAsync('spotifyAccessToken');
+      const savedRefreshToken = await SecureStore.getItemAsync('spotifyRefreshToken');
+
+      if (savedAccessToken) {
+        setAccessToken(savedAccessToken);
+      } else if (savedRefreshToken) {
+        refreshAccessToken(savedRefreshToken);
+      }
+    };
+
+    loadTokens();
+  }, []);
 
   useEffect(() => {
     const fetchToken = async () => {
@@ -48,8 +68,13 @@ export default function App() {
           });
 
           const tokenData = await tokenResponse.json();
-          console.log('Access Token:', tokenData.access_token);
-          setAccessToken(tokenData.access_token)
+          const { access_token, refresh_token, expires_in } = tokenData;
+
+          await SecureStore.setItemAsync('spotifyAccessToken', access_token);
+          await SecureStore.setItemAsync('spotifyRefreshToken', refresh_token);
+
+          setAccessToken(access_token);
+          scheduleTokenRefresh(refresh_token, expires_in);
         } catch (error) {
           console.error('Error fetching token:', error);
         }
@@ -59,32 +84,42 @@ export default function App() {
     fetchToken();
   }, [response]);
 
-  const fetchTopArtists = async () => {
-    console.log("I work")
-    if (accessToken) {
-      try {
-        const artistResponse = await fetch('https://api.spotify.com/v1/me/top/artists?limit=10', {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-        });
+  const refreshAccessToken = async (refreshToken) => {
+    try {
+      const tokenResponse = await fetch(discovery.tokenEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Basic ${btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)}`,
+        },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        }).toString(),
+      });
 
-        const artistData = await artistResponse.json();
-        console.log(artistData)
-        setTopArtists(artistData.items || []);
-      } catch (error) {
-        console.error('Error fetching top artists:', error);
-      }
+      const tokenData = await tokenResponse.json();
+      const { access_token, expires_in } = tokenData;
+
+      await SecureStore.setItemAsync('spotifyAccessToken', access_token);
+      setAccessToken(access_token);
+
+      scheduleTokenRefresh(refreshToken, expires_in);
+    } catch (error) {
+      console.error('Error refreshing token:', error);
     }
   };
 
-  useEffect(() => {
-    fetchTopArtists();
-  }, [accessToken])
+  const scheduleTokenRefresh = (refreshToken, expiresIn) => {
+    const refreshTime = (expiresIn - 60) * 1000;
+    setTimeout(() => {
+      refreshAccessToken(refreshToken);
+    }, refreshTime);
+  };
 
-  return (
-    <View style={styles.container}>
-      {!accessToken ? (
+  if (!accessToken) {
+    return (
+      <View style={styles.container}>
         <Button
           disabled={!request}
           title="Login with Spotify"
@@ -92,25 +127,33 @@ export default function App() {
             promptAsync();
           }}
         />
-      ) : (
-        <>
-          <Text style={styles.title}>Your Top Artists</Text>
-          <FlatList
-            data={topArtists}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <View style={styles.artistContainer}>
-                <Image
-                  source={{ uri: item.images[0]?.url }}
-                  style={styles.artistImage}
-                />
-                <Text style={styles.artistName}>{item.name}</Text>
-              </View>
-            )}
-          />
-        </>
-      )}
-    </View>
+      </View>
+    );
+  }
+
+  return (
+    <NavigationContainer>
+      <Tab.Navigator>
+        <Tab.Screen
+          name="Songs"
+          component={() => <Songs token={accessToken} />}
+          options={{
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="musical-notes" color={color} size={size} />
+            ),
+          }}
+        />
+        <Tab.Screen
+          name="Artists"
+          component={() => <Artists token={accessToken} />}
+          options={{
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="person" color={color} size={size} />
+            ),
+          }}
+        />
+      </Tab.Navigator>
+    </NavigationContainer>
   );
 }
 
@@ -119,27 +162,5 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: '#121212',
-  },
-  title: {
-    fontSize: 24,
-    color: '#FFFFFF',
-    marginBottom: 16,
-  },
-  artistContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  artistImage: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    marginRight: 16,
-  },
-  artistName: {
-    fontSize: 18,
-    color: '#FFFFFF',
   },
 });
